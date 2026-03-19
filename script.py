@@ -16,10 +16,19 @@ tasks = [
 def run():
     # 1. データ取得
     data = yf.download(tickers, period="2y")['Close']
-    data.index = data.index.tz_convert(pytz.timezone('Asia/Tokyo')).tz_localize(None)
+    
+    # --- 修正箇所：タイムゾーンの扱いを安全にする ---
+    if data.index.tz is None:
+        # タイムゾーンがない場合（古い挙動）
+        data.index = data.index.tz_localize('UTC').tz_convert(pytz.timezone('Asia/Tokyo')).tz_localize(None)
+    else:
+        # すでにタイムゾーンがある場合（現在の挙動）
+        data.index = data.index.tz_convert(pytz.timezone('Asia/Tokyo')).tz_localize(None)
+    # ---------------------------------------------
+
     data = data.ffill()
 
-    # 2. 各期間のCSV生成 (GASロジック再現)
+    # 2. 各期間のCSV生成
     for task in tasks:
         df = data.tail(task["limit"]).copy()
         base_prices = df.iloc[0]
