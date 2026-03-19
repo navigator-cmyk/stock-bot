@@ -1,7 +1,7 @@
 name: Update Stock Data
 on:
   schedule:
-    - cron: '0 0 * * *' # 日本時間 9:00 (UTC 0:00)
+    - cron: '30 21 * * *' # 日本時間 6:30 (UTC 0:00)
   workflow_dispatch: # 手動実行ボタンを有効化
 
 jobs:
