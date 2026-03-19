@@ -1,1 +1,28 @@
+name: Update Stock Data
+on:
+  schedule:
+    - cron: '0 0 * * *' # 日本時間 9:00 (UTC 0:00)
+  workflow_dispatch: # 手動実行ボタンを有効化
 
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # 書き込み権限を明示的に許可
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run script
+        run: python script.py
+      - name: Commit and Push
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add .
+          git commit -m "Update stock data and chart" || exit 0
+          git push
