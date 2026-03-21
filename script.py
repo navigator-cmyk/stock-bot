@@ -3,105 +3,152 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
 import pytz
-import japanize_matplotlib  # 日本語化ライブラリを追加
+import japanize_matplotlib
 import os
+import feedparser
+import requests
+import time
+from datetime import datetime
 
-# 銘柄設定
-tickers = ["IONQ", "RGTI", "QBTS", "QUBT", "^IXIC"]
-tasks = [
-    {"target": "Graph_1W", "limit": 5, "label_gap": 1},
-    {"target": "Graph_3M", "limit": 65, "label_gap": 5},
-    {"target": "Graph_1Y", "limit": 255, "label_gap": 20}
-]
+# --- 設定エリア ---
+USER_AGENT = "YourName your-email@example.com" # SECルール：名前とメールアドレスを記載
+TICKERS = ["IONQ", "RGTI", "QBTS", "QUBT"]
+CIK_MAP = {
+    "IONQ": "0001824920",
+    "RGTI": "0001838359",
+    "QBTS": "0001907982",
+    "QUBT": "0001758009"
+}
+
+def get_sec_info(ticker):
+    """SECから最新書類と現金残高を取得"""
+    cik = CIK_MAP[ticker]
+    headers = {'User-Agent': USER_AGENT}
+    
+    # 1. 最新の書類（Atom Feed）
+    feed_url = f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={cik}&output=atom"
+    latest_filing = "N/A"
+    try:
+        feed = feedparser.parse(requests.get(feed_url, headers=headers).text)
+        if feed.entries:
+            entry = feed.entries[0]
+            # "8-K" などの種別を抽出
+            f_type = entry.title.split('-')[0].strip() if '-' in entry.title else "Filing"
+            f_date = entry.updated[:10].replace('-', '/')
+            latest_filing = f"{f_type} ({f_date})"
+    except: pass
+    
+    time.sleep(0.2) # SECレート制限対策
+
+    # 2. 現金残高（Company Facts API）
+    cash = "N/A"
+    api_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+    try:
+        data = requests.get(api_url, headers=headers).json()
+        # 主要な現金タグを検索
+        for tag in ["CashAndCashEquivalentsAtCarryingValue", "CashCashEquivalentsRestrictedCashAndRestrictedCashEquivalents"]:
+            try:
+                values = data['facts']['us-gaap'][tag]['units']['USD']
+                latest_val = values[-1]['val']
+                cash = f"${latest_val / 1_000_000:,.1f}M"
+                break
+            except: continue
+    except: pass
+
+    return latest_filing, cash
+
+def generate_charts(data, usdjpy_data):
+    """チャート画像4枚を生成"""
+    # 1. 騰落率チャート (1W, 3M, 1Y)
+    periods = [
+        {"name": "1週間の値動き", "file": "weekly_chart.png", "days": 5, "fmt": "%m/%d"},
+        {"name": "3ヶ月間の値動き", "file": "quarterly_chart.png", "days": 65, "fmt": "%m/%d"},
+        {"name": "1年間の値動き", "file": "yearly_chart.png", "days": 255, "fmt": "%Y/%m"}
+    ]
+    
+    for p in periods:
+        df = data.tail(p["days"])
+        base = df.iloc[0].replace(0, 1)
+        normalized = (df / base) - 1
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        indices = range(len(df))
+        colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']
+        for i, t in enumerate(TICKERS):
+            ax.plot(indices, normalized[t], label=t, color=colors[i], linewidth=2)
+        
+        ax.set_title(p["name"], fontsize=18, pad=20)
+        ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
+        ax.axhline(0, color='black', linewidth=1)
+        ax.grid(True, linestyle='--', alpha=0.6)
+        
+        # X軸
+        step = max(1, len(df) // 5)
+        ax.set_xticks(list(range(0, len(df), step)) + [len(df)-1])
+        ax.set_xticklabels([df.index[i].strftime(p["fmt"]) for i in ax.get_xticks()])
+        
+        ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.12), ncol=4, frameon=False, fontsize=12)
+        plt.subplots_adjust(bottom=0.2)
+        plt.savefig(p["file"], bbox_inches='tight')
+        plt.close()
+
+    # 2. ドル円3ヶ月チャート
+    df_fx = usdjpy_data.tail(65)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(range(len(df_fx)), df_fx.values, color='#888888', linewidth=2)
+    ax.set_title("ドル円（3ヶ月）", fontsize=18, pad=20)
+    ax.grid(True, linestyle='--', alpha=0.6)
+    
+    step = 10
+    ax.set_xticks(list(range(0, len(df_fx), step)) + [len(df_fx)-1])
+    ax.set_xticklabels([df_fx.index[i].strftime('%m/%d') for i in ax.get_xticks()])
+    
+    plt.savefig("usdjpy_3m_chart.png", bbox_inches='tight')
+    plt.close()
 
 def run():
     print("データ取得開始...")
-    data = yf.download(tickers, period="2y")['Close']
+    all_data = yf.download(TICKERS + ["JPY=X"], period="2y")['Close']
+    all_data.index = all_data.index.tz_localize(None)
     
-    # タイムゾーン処理
-    if data.index.tz is None:
-        data.index = data.index.tz_localize('UTC').tz_convert(pytz.timezone('Asia/Tokyo')).tz_localize(None)
-    else:
-        data.index = data.index.tz_convert(pytz.timezone('Asia/Tokyo')).tz_localize(None)
+    stock_data = all_data[TICKERS].ffill()
+    usdjpy_data = all_data["JPY=X"].ffill()
 
-    data = data.ffill()
+    # 1. チャート生成
+    generate_charts(stock_data, usdjpy_data)
 
-    print("CSVデータ生成開始 (実際の株価を保存)...")
-    for task in tasks:
-        df = data.tail(task["limit"]).copy()
+    # 2. 比較評価テーブルと決算日の作成
+    valuation_rows = []
+    earnings_rows = []
+
+    for t in TICKERS:
+        print(f"{t} の詳細データを取得中...")
+        info = yf.Ticker(t)
         
-        # ラベル間引き処理
-        labels = df.index.strftime('%Y/%m/%d').tolist()
-        formatted_labels = [l if (i == len(labels)-1 or i % task["label_gap"] == 0) else "" for i, l in enumerate(labels)]
+        # 基本情報
+        price = stock_data[t].iloc[-1]
+        mkt_cap = info.info.get('marketCap', 0)
+        mkt_cap_str = f"${mkt_cap / 1_000_000_000:.2f}B" if mkt_cap > 0 else "N/A"
         
-        # 騰落率ではなく「実際の株価 (df)」をそのままCSVに保存
-        csv_df = df.reset_index()
-        csv_df.columns = ["Date"] + tickers
-        csv_df["Date"] = formatted_labels
-        csv_df.to_csv(f"stock_data_{task['target']}.csv", index=False)
+        # SEC情報
+        filing, cash = get_sec_info(t)
+        
+        # 決算予定日
+        e_date = "N/A"
+        try:
+            cal = info.calendar
+            if not cal.empty and 'Earnings Date' in cal.index:
+                e_date = cal.loc['Earnings Date'][0].strftime('%Y/%m/%d')
+        except: pass
 
-    print("最新価格CSV生成開始...")
-    latest_2d = data.tail(2)
-    latest_prices = latest_2d.T
-    latest_prices.columns = ["Prev", "Latest"]
-    latest_prices = latest_prices.reset_index()
-    latest_prices.columns = ["Ticker", "Prev_Close", "Latest_Close"]
-    latest_prices["Date"] = latest_2d.index[-1].strftime('%Y/%m/%d')
-    latest_prices[["Date", "Ticker", "Latest_Close", "Prev_Close"]].to_csv("stock_data_latest_prices.csv", index=False)
+        valuation_rows.append([t, f"{price:.2f}", mkt_cap_str, cash, filing])
+        earnings_rows.append([t, e_date])
 
-    print("チャート画像生成開始...")
-    # チャート生成 (日本語タイトルに変更)
-    generate_compressed_chart(data.tail(5), "1週間の値動き", "weekly_chart.png", tick_format='%m/%d')
-    generate_compressed_chart(data.tail(65), "3ヶ月間の値動き", "quarterly_chart.png", tick_format='%m/%d')
-    generate_compressed_chart(data.tail(255), "1年間の値動き", "yearly_chart.png", tick_format='%Y/%m')
+    # CSV保存
+    pd.DataFrame(valuation_rows, columns=["銘柄", "株価($)", "時価総額", "現金残高", "直近の重要開示(SEC)"]).to_csv("valuation_table.csv", index=False)
+    pd.DataFrame(earnings_rows, columns=["銘柄", "次回決算予定日"]).to_csv("earnings_calendar.csv", index=False)
 
-def generate_compressed_chart(df, title, filename, tick_format):
-    # グラフ描画用に「メモリ上だけで」騰落率を計算 (CSVには影響しません)
-    base_prices = df.iloc[0].replace(0, 1) # 0割防止
-    normalized = (df / base_prices) - 1
-    
-    fig, ax = plt.subplots(figsize=(10, 6))
-    
-    indices = range(len(df))
-    dates = df.index
-    colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728', '#7f7f7f']
-    
-    for i, t in enumerate(tickers):
-        label = t.replace("^IXIC", ".IXIC")
-        ax.plot(indices, normalized[t], label=label, color=colors[i], linewidth=2 if t=="^IXIC" else 1.5)
-    
-    # タイトル (日本語)
-    ax.set_title(title, fontsize=18, pad=20)
-    
-    # 縦軸設定
-    ax.yaxis.set_major_formatter(mtick.PercentFormatter(1.0))
-    ax.axhline(0, color='black', linewidth=1)
-    ax.grid(True, linestyle='--', alpha=0.6)
-    
-    # X軸設定
-    N = len(df)
-    if N <= 10: gap = 1
-    elif N <= 70: gap = 10
-    else: gap = 40
-    
-    tick_indices = list(range(0, N, gap))
-    if (N-1) not in tick_indices: tick_indices.append(N-1)
-    tick_labels = [dates[i].strftime(tick_format) for i in tick_indices]
-    
-    ax.set_xticks(tick_indices)
-    ax.set_xticklabels(tick_labels, fontsize=10)
-    
-    # --- 修正点: 凡例をグラフの「下」に配置 ---
-    # bbox_to_anchorのY座標をマイナスにして枠外下部に置く
-    display_labels = [t.replace("^IXIC", ".IXIC") for t in tickers]
-    ax.legend(display_labels, loc='upper center', bbox_to_anchor=(0.5, -0.12), 
-               ncol=len(tickers), frameon=False, fontsize=12)
-    
-    # グラフ下部に凡例用の余白を作る
-    plt.subplots_adjust(bottom=0.2)
-    
-    plt.savefig(filename, bbox_inches='tight')
-    plt.close()
+    print("すべてのファイル生成が完了しました。")
 
 if __name__ == "__main__":
     run()
