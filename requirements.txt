@@ -3,3 +3,5 @@ pandas
 matplotlib
 pytz
 japanize-matplotlib
+feedparser
+requests
