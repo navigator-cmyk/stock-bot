@@ -100,33 +100,28 @@ def generate_charts(data):
 
 def run():
     print("データ取得開始...")
-    # ナスダックと為替を含めてダウンロード
     download_list = TICKERS + [NASDAQ_SYMBOL, "JPY=X"]
     all_data = yf.download(download_list, period="2y")['Close']
     all_data.index = all_data.index.tz_localize(None)
     
+    # 【重要】未確定データの排除ロジック
+    # 今日の日付（UTC基準）を取得
+    today = pd.Timestamp.now().normalize()
+    # 最終行の日付が今日以降（＝まだ閉場していない不完全なデータ）なら削除
+    if all_data.index[-1] >= today:
+        print(f"未確定データ（{all_data.index[-1]}）を除外します。")
+        all_data = all_data.iloc[:-1]
+    
     stock_data = all_data[TICKERS + [NASDAQ_SYMBOL]].ffill()
     usdjpy_data = all_data["JPY=X"].ffill()
 
-    # 1. チャート生成
+    # 1. チャート生成 (修正後の stock_data を使用)
     generate_charts(stock_data)
 
-    # 2. ドル円3ヶ月チャート
-    df_fx = usdjpy_data.tail(65)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    ax.plot(range(len(df_fx)), df_fx.values, color='#888888', linewidth=2)
-    ax.set_title("ドル円（3ヶ月）", fontsize=18, pad=20)
-    ax.grid(True, linestyle='--', alpha=0.6)
-    step = 10
-    ax.set_xticks(list(range(0, len(df_fx), step)) + [len(df_fx)-1])
-    ax.set_xticklabels([df_fx.index[i].strftime('%m/%d') for i in ax.get_xticks()])
-    plt.savefig("usdjpy_3m_chart.png", bbox_inches='tight')
-    plt.close()
-
     # 3. GAS用：最新株価CSVの作成 (latest_prices.csv)
-    # GASの LatestPrices シート用フォーマット: Date, Ticker, LatestClose, PrevClose
-    latest_price_rows = []
+    # 確定した最終行の日付を使用
     latest_date_str = stock_data.index[-1].strftime('%Y/%m/%d')
+    latest_price_rows = []
     for t in TICKERS + [NASDAQ_SYMBOL]:
         latest_close = stock_data[t].iloc[-1]
         prev_close = stock_data[t].iloc[-2]
