@@ -104,13 +104,27 @@ def run():
     all_data = yf.download(download_list, period="2y")['Close']
     all_data.index = all_data.index.tz_localize(None)
     
-    # 【重要】未確定データの排除ロジック
-    # 今日の日付（UTC基準）を取得
-    today = pd.Timestamp.now().normalize()
-    # 最終行の日付が今日以降（＝まだ閉場していない不完全なデータ）なら削除
-    if all_data.index[-1] >= today:
-        print(f"未確定データ（{all_data.index[-1]}）を除外します。")
+    # --- 修正箇所：未確定データの排除ロジック ---
+    # 米国東部時間（ET）を基準に判定を行う
+    tz_ny = pytz.timezone('America/New_York')
+    now_ny = datetime.now(tz_ny)
+    today_ny = pd.Timestamp(now_ny.date())
+    
+    # 最終行の日付を取得
+    last_date = all_data.index[-1]
+    
+    if last_date > today_ny:
+        # 未来の日付データが存在する場合は削除（異常値対応）
+        print(f"未来の未確定データ（{last_date.date()}）を除外します。")
         all_data = all_data.iloc[:-1]
+    elif last_date == today_ny:
+        # 最終行が「現地時間の今日」の場合、市場閉場（16:00 ET）前なら削除
+        if now_ny.hour < 16:
+            print(f"本日の未確定データ（{last_date.date()}）を除外します。")
+            all_data = all_data.iloc[:-1]
+        else:
+            print(f"本日の確定済みデータ（{last_date.date()}）を保持します。")
+    # ------------------------------------------
     
     stock_data = all_data[TICKERS + [NASDAQ_SYMBOL]].ffill()
     usdjpy_data = all_data["JPY=X"].ffill()
@@ -119,7 +133,6 @@ def run():
     generate_charts(stock_data)
 
     # 3. GAS用：最新株価CSVの作成 (latest_prices.csv)
-    # 確定した最終行の日付を使用
     latest_date_str = stock_data.index[-1].strftime('%Y/%m/%d')
     latest_price_rows = []
     for t in TICKERS + [NASDAQ_SYMBOL]:
