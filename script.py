@@ -1,4 +1,4 @@
-import yf
+import yfinance as yf
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
@@ -22,7 +22,7 @@ CIK_MAP = {
 }
 
 def get_sec_info(ticker):
-    """SECから最新書類と現金残高を取得（変更なし）"""
+    """SECから最新書類と現金残高を取得"""
     if ticker == NASDAQ_SYMBOL: return "N/A", "N/A"
     cik = CIK_MAP.get(ticker)
     if not cik: return "N/A", "N/A"
@@ -61,7 +61,7 @@ def get_sec_info(ticker):
     return latest_filing, cash
 
 def generate_charts(df_stocks):
-    """騰落率チャート生成（引数を整理）"""
+    """騰落率チャート生成"""
     periods = [
         {"name": "1週間の値動き", "file": "weekly_chart.png", "days": 5, "fmt": "%m/%d"},
         {"name": "3ヶ月間の値動き", "file": "quarterly_chart.png", "days": 65, "fmt": "%m/%d"},
@@ -70,7 +70,7 @@ def generate_charts(df_stocks):
     
     for p in periods:
         df = df_stocks.tail(p["days"])
-        if df.empty: continue
+        if df.empty or len(df) < 2: continue
         base = df.iloc[0].replace(0, 1)
         normalized = (df / base) - 1
         
@@ -102,55 +102,55 @@ def generate_charts(df_stocks):
 def run():
     print("データ取得開始...")
     
-    # --- 1. 株価データの取得（開場日ベース） ---
+    # 1. 株価データの取得（開場日ベース）
     stock_symbols = TICKERS + [NASDAQ_SYMBOL]
     stock_data = yf.download(stock_symbols, period="2y")['Close']
     stock_data.index = stock_data.index.tz_localize(None)
     
-    # --- 2. 為替データの取得（分離） ---
+    # 2. 為替データの取得（干渉させないために分離）
     usdjpy_data = yf.download("JPY=X", period="2y")['Close']
-    # ※今回はチャートやテーブルに直接使わないため保持のみ
 
-    # --- 3. 未確定データ（ザラ場中）の排除 ---
-    tz_ny = pytz.timezone('America/New_York')
-    now_ny = datetime.now(tz_ny)
-    today_ny = pd.Timestamp(now_ny.date())
-    
-    if stock_data.index[-1] >= today_ny:
-        # 今日が未来、または今日の市場がまだ閉まっていない(16時前)なら削除
-        if stock_data.index[-1] > today_ny or now_ny.hour < 16:
-            print(f"未確定データ（{stock_data.index[-1].date()}）を除外します。")
-            stock_data = stock_data.iloc[:-1]
+    # 3. 未確定データ（ザラ場中）の排除
+    if not stock_data.empty:
+        tz_ny = pytz.timezone('America/New_York')
+        now_ny = datetime.now(tz_ny)
+        today_ny = pd.Timestamp(now_ny.date())
+        
+        if stock_data.index[-1] >= today_ny:
+            # 今日が未来、または今日の市場がまだ閉まっていない(16時前)なら削除
+            if stock_data.index[-1] > today_ny or now_ny.hour < 16:
+                print(f"未確定データ（{stock_data.index[-1].date()}）を除外します。")
+                stock_data = stock_data.iloc[:-1]
 
-    # --- 4. チャート生成 ---
+    # 4. チャート生成
     generate_charts(stock_data)
 
-    # --- 5. GAS用：最新株価CSV (latest_prices.csv) ---
-    latest_date_str = stock_data.index[-1].strftime('%Y/%m/%d')
-    latest_price_rows = []
-    for t in stock_symbols:
-        latest_close = stock_data[t].iloc[-1]
-        prev_close = stock_data[t].iloc[-2] # 1つ前の営業日の値を確実に取得
-        latest_price_rows.append([latest_date_str, t, latest_close, prev_close])
-    
-    pd.DataFrame(latest_price_rows, columns=["Date", "Ticker", "LatestClose", "PrevClose"]).to_csv("latest_prices.csv", index=False)
+    # 5. GAS用：最新株価CSV (latest_prices.csv)
+    if len(stock_data) >= 2:
+        latest_date_str = stock_data.index[-1].strftime('%Y/%m/%d')
+        latest_price_rows = []
+        for t in stock_symbols:
+            latest_close = stock_data[t].iloc[-1]
+            prev_close = stock_data[t].iloc[-2] # 確実な前営業日
+            latest_price_rows.append([latest_date_str, t, latest_close, prev_close])
+        
+        pd.DataFrame(latest_price_rows, columns=["Date", "Ticker", "LatestClose", "PrevClose"]).to_csv("latest_prices.csv", index=False)
+    else:
+        print("データが不足しているため最新価格CSVの出力をスキップします。")
 
-    # --- 6. 評価テーブルと決算カレンダー ---
+    # 6. 評価テーブルと決算カレンダー
     valuation_rows = []
     earnings_rows = []
     for t in TICKERS:
         print(f"{t} の詳細データを取得中...")
         info = yf.Ticker(t)
-        price = stock_data[t].iloc[-1]
+        price = stock_data[t].iloc[-1] if not stock_data.empty else 0
         
-        # 時価総額
         mkt_cap = info.info.get('marketCap', 0)
         mkt_cap_str = f"${mkt_cap / 1_000_000_000:.2f}B" if mkt_cap > 0 else "N/A"
         
-        # SEC情報
         filing, cash = get_sec_info(t)
         
-        # 決算日
         e_date = "N/A"
         try:
             cal = info.calendar
