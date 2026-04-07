@@ -1,4 +1,4 @@
-import yfinance as yf
+import yf
 import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mtick
@@ -13,7 +13,7 @@ from datetime import datetime
 # --- 設定エリア ---
 USER_AGENT = "YourName your-email@example.com"
 TICKERS = ["IONQ", "RGTI", "QBTS", "QUBT"]
-NASDAQ_SYMBOL = "^IXIC"  # ナスダックを追加
+NASDAQ_SYMBOL = "^IXIC"
 CIK_MAP = {
     "IONQ": "0001824920",
     "RGTI": "0001838359",
@@ -22,9 +22,11 @@ CIK_MAP = {
 }
 
 def get_sec_info(ticker):
-    """SECから最新書類と現金残高を取得"""
+    """SECから最新書類と現金残高を取得（変更なし）"""
     if ticker == NASDAQ_SYMBOL: return "N/A", "N/A"
-    cik = CIK_MAP[ticker]
+    cik = CIK_MAP.get(ticker)
+    if not cik: return "N/A", "N/A"
+    
     headers = {'User-Agent': USER_AGENT}
     
     # 1. 最新の書類
@@ -58,8 +60,8 @@ def get_sec_info(ticker):
 
     return latest_filing, cash
 
-def generate_charts(data):
-    """騰落率チャート (1W, 3M, 1Y) を生成"""
+def generate_charts(df_stocks):
+    """騰落率チャート生成（引数を整理）"""
     periods = [
         {"name": "1週間の値動き", "file": "weekly_chart.png", "days": 5, "fmt": "%m/%d"},
         {"name": "3ヶ月間の値動き", "file": "quarterly_chart.png", "days": 65, "fmt": "%m/%d"},
@@ -67,7 +69,7 @@ def generate_charts(data):
     ]
     
     for p in periods:
-        df = data.tail(p["days"])
+        df = df_stocks.tail(p["days"])
         if df.empty: continue
         base = df.iloc[0].replace(0, 1)
         normalized = (df / base) - 1
@@ -75,12 +77,11 @@ def generate_charts(data):
         fig, ax = plt.subplots(figsize=(10, 6))
         indices = range(len(df))
         
-        # 量子銘柄のプロット
         colors = ['#1f77b4', '#2ca02c', '#ff7f0e', '#d62728']
         for i, t in enumerate(TICKERS):
-            ax.plot(indices, normalized[t], label=t, color=colors[i], linewidth=2)
+            if t in normalized.columns:
+                ax.plot(indices, normalized[t], label=t, color=colors[i], linewidth=2)
         
-        # ナスダックのプロット（グレー表示）
         if NASDAQ_SYMBOL in normalized.columns:
             ax.plot(indices, normalized[NASDAQ_SYMBOL], label="Nasdaq", color='gray', linewidth=1.5, linestyle='--', alpha=0.7)
         
@@ -100,60 +101,56 @@ def generate_charts(data):
 
 def run():
     print("データ取得開始...")
-    download_list = TICKERS + [NASDAQ_SYMBOL, "JPY=X"]
-    all_data = yf.download(download_list, period="2y")['Close']
-    all_data.index = all_data.index.tz_localize(None)
     
-    # --- 修正箇所：未確定データの排除ロジック ---
-    # 米国東部時間（ET）を基準に判定を行う
+    # --- 1. 株価データの取得（開場日ベース） ---
+    stock_symbols = TICKERS + [NASDAQ_SYMBOL]
+    stock_data = yf.download(stock_symbols, period="2y")['Close']
+    stock_data.index = stock_data.index.tz_localize(None)
+    
+    # --- 2. 為替データの取得（分離） ---
+    usdjpy_data = yf.download("JPY=X", period="2y")['Close']
+    # ※今回はチャートやテーブルに直接使わないため保持のみ
+
+    # --- 3. 未確定データ（ザラ場中）の排除 ---
     tz_ny = pytz.timezone('America/New_York')
     now_ny = datetime.now(tz_ny)
     today_ny = pd.Timestamp(now_ny.date())
     
-    # 最終行の日付を取得
-    last_date = all_data.index[-1]
-    
-    if last_date > today_ny:
-        # 未来の日付データが存在する場合は削除（異常値対応）
-        print(f"未来の未確定データ（{last_date.date()}）を除外します。")
-        all_data = all_data.iloc[:-1]
-    elif last_date == today_ny:
-        # 最終行が「現地時間の今日」の場合、市場閉場（16:00 ET）前なら削除
-        if now_ny.hour < 16:
-            print(f"本日の未確定データ（{last_date.date()}）を除外します。")
-            all_data = all_data.iloc[:-1]
-        else:
-            print(f"本日の確定済みデータ（{last_date.date()}）を保持します。")
-    # ------------------------------------------
-    
-    stock_data = all_data[TICKERS + [NASDAQ_SYMBOL]].ffill()
-    usdjpy_data = all_data["JPY=X"].ffill()
+    if stock_data.index[-1] >= today_ny:
+        # 今日が未来、または今日の市場がまだ閉まっていない(16時前)なら削除
+        if stock_data.index[-1] > today_ny or now_ny.hour < 16:
+            print(f"未確定データ（{stock_data.index[-1].date()}）を除外します。")
+            stock_data = stock_data.iloc[:-1]
 
-    # 1. チャート生成 (修正後の stock_data を使用)
+    # --- 4. チャート生成 ---
     generate_charts(stock_data)
 
-    # 3. GAS用：最新株価CSVの作成 (latest_prices.csv)
+    # --- 5. GAS用：最新株価CSV (latest_prices.csv) ---
     latest_date_str = stock_data.index[-1].strftime('%Y/%m/%d')
     latest_price_rows = []
-    for t in TICKERS + [NASDAQ_SYMBOL]:
+    for t in stock_symbols:
         latest_close = stock_data[t].iloc[-1]
-        prev_close = stock_data[t].iloc[-2]
+        prev_close = stock_data[t].iloc[-2] # 1つ前の営業日の値を確実に取得
         latest_price_rows.append([latest_date_str, t, latest_close, prev_close])
     
     pd.DataFrame(latest_price_rows, columns=["Date", "Ticker", "LatestClose", "PrevClose"]).to_csv("latest_prices.csv", index=False)
 
-    # 4. 評価テーブルと決算カレンダーの作成
+    # --- 6. 評価テーブルと決算カレンダー ---
     valuation_rows = []
     earnings_rows = []
     for t in TICKERS:
         print(f"{t} の詳細データを取得中...")
         info = yf.Ticker(t)
         price = stock_data[t].iloc[-1]
+        
+        # 時価総額
         mkt_cap = info.info.get('marketCap', 0)
         mkt_cap_str = f"${mkt_cap / 1_000_000_000:.2f}B" if mkt_cap > 0 else "N/A"
         
+        # SEC情報
         filing, cash = get_sec_info(t)
         
+        # 決算日
         e_date = "N/A"
         try:
             cal = info.calendar
