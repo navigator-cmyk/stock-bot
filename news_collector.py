@@ -2,144 +2,132 @@ import feedparser
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 import time
+import calendar
 
+# --- 設定 ---
+OUTPUT_FILE = "news_list.csv"
 HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-# --- RSSソース ---
-RSS_SOURCES = {
-    "IBM": "https://research.ibm.com/blog/rss.xml",
-    "Google": "https://blog.google/technology/ai/rss/",
-    "Microsoft": "https://azure.microsoft.com/en-us/blog/feed/",
-    "NVIDIA": "https://blogs.nvidia.com/feed/",
-    "Reuters": "https://www.reutersagency.com/feed/?best-topics=technology",
-    "SeekingAlpha": "https://seekingalpha.com/market_currents.xml",
-    "Nature": "https://www.nature.com/nature.rss",
-    "Science": "https://www.science.org/action/showFeed?type=etoc&feed=rss&jc=science",
-    "QCR": "https://quantumcomputingreport.com/feed/",
-    "QuantumInsider": "https://thequantuminsider.com/feed/",
-    "IQT": "https://www.insidequantumtechnology.com/feed/",
-    "Bloomberg": "https://feeds.bloomberg.com/technology/news.rss"
-}
+# 取得対象の範囲（今日と昨日）
+TODAY = datetime.now().date()
+YESTERDAY = TODAY - timedelta(days=1)
 
-ARXIV_API = "http://export.arxiv.org/api/query?search_query=cat:quant-ph&max_results=30&sortBy=submittedDate&sortOrder=descending"
-
-IONQ_URL = "https://ionq.com/news"
+def is_target_date(published_struct):
+    """feedparserの日付構造体が今日か昨日か判定"""
+    if not published_struct:
+        return False
+    dt = datetime(*published_struct[:3]).date()
+    return dt == TODAY or dt == YESTERDAY
 
 def is_quantum(text):
-    return "quantum" in text.lower()
+    keywords = ["quantum", "量子", "qubit", "ionq", "rigetti", "d-wave"]
+    return any(k in text.lower() for k in keywords)
 
-# --- RSS ---
+# --- RSS取得 ---
 def fetch_rss(name, url):
     rows = []
     try:
-        feed = feedparser.parse(url)
-
-        print(f"[{name}] entries={len(feed.entries)} bozo={feed.bozo}")
-
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        feed = feedparser.parse(res.text)
+        
         for e in feed.entries:
+            # 日付チェック
+            pub_struct = getattr(e, "published_parsed", None)
+            if not is_target_date(pub_struct):
+                continue
+            
             title = getattr(e, "title", "")
             summary = getattr(e, "summary", "")
             link = getattr(e, "link", "")
-            date = getattr(e, "published", datetime.now().strftime("%Y/%m/%d"))
+            date_str = datetime(*pub_struct[:3]).strftime("%Y-%m-%d")
 
-            if not is_quantum(title + summary):
-                continue
-
-            rows.append([
-                date, "", "", name, "", title, link, summary[:300], ""
-            ])
-
+            if is_quantum(title + summary):
+                rows.append([date_str, name, title, link])
     except Exception as e:
         print(f"[ERROR][{name}] {e}")
-
     return rows
 
 # --- arXiv ---
 def fetch_arxiv():
-    rows = []
-    try:
-        res = requests.get(ARXIV_API, headers=HEADERS, timeout=15)
-        feed = feedparser.parse(res.text)
+    # arXivは量が多いので、API側で今日・昨日のフィルタは難しいが、取得後にフィルタする
+    url = "http://export.arxiv.org/api/query?search_query=cat:quant-ph&max_results=30&sortBy=submittedDate&sortOrder=descending"
+    return fetch_rss("arXiv", url)
 
-        print(f"[arXiv] entries={len(feed.entries)}")
-
-        for e in feed.entries:
-            rows.append([
-                e.published, "", "Paper", "arXiv", "",
-                e.title, e.link, e.summary[:300], ""
-            ])
-
-    except Exception as e:
-        print(f"[ERROR][arXiv] {e}")
-
-    return rows
-
-# --- IonQ（HTMLスクレイピング） ---
+# --- IonQ (HTMLスクレイピング) ---
 def fetch_ionq():
     rows = []
+    url = "https://ionq.com/news"
     try:
-        res = requests.get(IONQ_URL, headers=HEADERS, timeout=15)
-        print(f"[IonQ] status={res.status_code}")
-
+        res = requests.get(url, headers=HEADERS, timeout=15)
         soup = BeautifulSoup(res.text, "html.parser")
-
-        articles = soup.find_all("a")
-
+        
+        # IonQのニュースリスト（構造に合わせて調整が必要な場合があります）
+        # 各記事が <article> や特定のクラスに囲まれていると想定
+        articles = soup.find_all("a", href=True)
+        
         for a in articles:
             title = a.get_text(strip=True)
-            link = a.get("href")
-
-            if not title or not link:
+            href = a["href"]
+            
+            if not is_quantum(title) or len(title) < 20:
                 continue
 
-            if "news" not in link:
-                continue
-
-            if not is_quantum(title):
-                continue
-
-            if not link.startswith("http"):
-                link = "https://ionq.com" + link
-
-            rows.append([
-                datetime.now().strftime("%Y/%m/%d"),
-                "", "", "IonQ", "",
-                title, link, "", ""
-            ])
-
+            # IonQのようなサイトはaタグの近くに日付テキストがあることが多い
+            # 日付が見つからない場合は「最新情報」として今日の日付で処理
+            # ※本来は詳細ページへ行くか、前後の要素から日付を抽出します
+            
+            full_url = href if href.startswith("http") else "https://ionq.com" + href
+            
+            # 今回は「中継用」なので、URLが新しいものを拾う
+            # 日付判別が難しい場合は、実行日の日付を入れる
+            rows.append([TODAY.strftime("%Y-%m-%d"), "IonQ", title, full_url])
+            
+        # IonQなどは件数が多いので上位5件程度に絞る（過去ログ混入防止）
+        return rows[:5]
     except Exception as e:
         print(f"[ERROR][IonQ] {e}")
-
     return rows
 
-# --- メイン ---
-def fetch_all():
-    all_rows = []
+# --- メイン処理 ---
+def main():
+    all_data = []
+
+    # RSSソースの巡回
+    RSS_SOURCES = {
+        "IBM": "https://research.ibm.com/blog/rss.xml",
+        "Google": "https://blog.google/technology/ai/rss/",
+        "NVIDIA": "https://blogs.nvidia.com/feed/",
+        "QuantumInsider": "https://thequantuminsider.com/feed/",
+        "QCR": "https://quantumcomputingreport.com/feed/"
+    }
 
     for name, url in RSS_SOURCES.items():
-        all_rows.extend(fetch_rss(name, url))
+        print(f"Fetching {name}...")
+        all_data.extend(fetch_rss(name, url))
         time.sleep(1)
 
-    all_rows.extend(fetch_arxiv())
-    all_rows.extend(fetch_ionq())
+    print("Fetching arXiv...")
+    all_data.extend(fetch_arxiv())
+    
+    print("Fetching IonQ...")
+    all_data.extend(fetch_ionq())
 
-    if not all_rows:
-        print("No data collected")
-        return
+    # CSV作成
+    df = pd.DataFrame(all_data, columns=["Date", "Source", "Title", "URL"])
+    
+    if df.empty:
+        # データが空の場合、GAS側がエラーにならないよう空のヘッダーだけ作成するか、
+        # 処理を中断するか選べます。ここではヘッダーのみ作成します。
+        df = pd.DataFrame(columns=["Date", "Source", "Title", "URL"])
 
-    df = pd.DataFrame(all_rows, columns=[
-        "Date","Flag","Category","Source","Target",
-        "Title","URL","Summary","Summary_X"
-    ])
-
-    # 重複除去
-    df["URL_norm"] = df["URL"].str.lower().str.rstrip("/")
-    df = df.drop_duplicates(subset=["URL_norm"]).drop(columns=["URL_norm"])
-
-    df.to_csv("news_list.csv", index=False, encoding="utf-8-sig")
-    print(f"Saved: {len(df)} rows")
+    # 重複削除
+    df = df.drop_duplicates(subset=["URL"])
+    
+    # 上書き保存（encodingはスプレッドシートが読みやすいようutf-8-sig）
+    df.to_csv(OUTPUT_FILE, index=False, encoding="utf-8-sig")
+    print(f"Saved {len(df)} articles to {OUTPUT_FILE} (Filtered for Today/Yesterday)")
 
 if __name__ == "__main__":
-    fetch_all()
+    main()
