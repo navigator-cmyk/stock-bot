@@ -138,7 +138,7 @@ def fetch_all():
     df["URL_norm"] = df["URL"].str.lower().str.rstrip("/")
     df = df.drop_duplicates(subset=["URL_norm"]).drop(columns=["URL_norm"])
 
-    df.to_csv("quantum_news.csv", index=False, encoding="utf-8-sig")
+    df.to_csv("news_list.csv", index=False, encoding="utf-8-sig")
     print(f"Saved: {len(df)} rows")
 
 if __name__ == "__main__":
